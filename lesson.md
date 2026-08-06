@@ -14,10 +14,11 @@ Today's focus is learning Docker, not debugging complex applications. Your full 
 
 By the end of this session, you will be able to:
 
-1. **Apply** Docker containerization to a multi-layered Spring Boot REST API application
-2. **Create** a Dockerfile for a Spring Boot application with PostgreSQL dependencies
-3. **Configure** Docker Compose to orchestrate multiple containers (application + database)
-4. **Test** and verify that containerized endpoints work correctly
+1. **Scaffold** a simplified Spring Boot REST API project (simple-crm-lite) with a single entity
+2. **Apply** Docker containerization to a multi-layered Spring Boot REST API application
+3. **Create** a Dockerfile for a Spring Boot application with PostgreSQL dependencies
+4. **Configure** Docker Compose to orchestrate multiple containers (application + database)
+5. **Test** and verify that containerized endpoints work correctly
 
 ---
 
@@ -27,8 +28,309 @@ Before starting this lesson, ensure you have:
 
 - Completed Lessons 4.4 (Local Containerization) and 4.6 (Docker Compose)
 - Docker Desktop installed and running
-- Your **simple-crm-lite** Spring Boot project ready and working locally
-- PostgreSQL running locally with the `simplecrmlite` database created
+- Java 21 and Maven installed
+- PostgreSQL installed locally (for local verification before containerizing)
+
+**Note:** Unlike previous lessons, you do NOT need an existing project yet — Part 0 below walks you through creating **simple-crm-lite** from scratch.
+
+---
+
+## Part 0: Create Simple-CRM-Lite
+
+Before containerizing anything, let's build the simplified project this lesson uses.
+
+### Step 1: Generate the Project with Spring Initializr
+
+1. Go to [https://start.spring.io](https://start.spring.io)
+2. Fill in the project details:
+   - **Project:** Maven
+   - **Language:** Java
+   - **Spring Boot:** 3.2.0
+   - **Group:** `com.example`
+   - **Artifact:** `simple-crm-lite`
+   - **Name:** `simple-crm-lite`
+   - **Package name:** `com.example.simplecrmlite`
+   - **Packaging:** Jar
+   - **Java:** 21
+3. Under **Dependencies**, add:
+   - **Spring Web**
+   - **Spring Data JPA**
+   - **PostgreSQL Driver**
+4. Click **Generate**, extract the `.zip`, and open the project in VS Code
+
+**Important:** Keep the **Artifact** exactly as `simple-crm-lite` and leave the default version as `0.0.1-SNAPSHOT`. The Dockerfile later in this lesson references the exact filename this produces (`simple-crm-lite-0.0.1-SNAPSHOT.jar`) — matching it now avoids a mismatch later.
+
+### Step 2: Set Up Local PostgreSQL Database
+
+Before running the app, create the local database:
+
+```sql
+-- Connect to psql, then run:
+CREATE DATABASE simplecrmlite;
+```
+
+### Step 3: Configure application.properties
+
+Open `src/main/resources/application.properties` and add:
+
+```properties
+# Application name
+spring.application.name=simple-crm-lite
+
+# Database configuration (local PostgreSQL)
+spring.datasource.url=jdbc:postgresql://localhost:5432/simplecrmlite
+spring.datasource.username=postgres
+spring.datasource.password=password
+
+# JPA configuration
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
+
+# Server configuration
+server.port=8080
+```
+
+**Note:** Adjust `spring.datasource.username` / `spring.datasource.password` to match your own local PostgreSQL credentials if they differ.
+
+### Step 4: Create the Customer Entity
+
+Create `src/main/java/com/example/simplecrmlite/model/Customer.java`:
+
+```java
+package com.example.simplecrmlite.model;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+
+@Entity
+public class Customer {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String firstName;
+    private String lastName;
+    private String email;
+    private String contactNo;
+    private String jobTitle;
+    private Integer yearOfBirth;
+
+    public Customer() {
+    }
+
+    public Customer(String firstName, String lastName, String email,
+                     String contactNo, String jobTitle, Integer yearOfBirth) {
+        this.firstName = firstName;
+        this.lastName = lastName;
+        this.email = email;
+        this.contactNo = contactNo;
+        this.jobTitle = jobTitle;
+        this.yearOfBirth = yearOfBirth;
+    }
+
+    // Getters and setters
+
+    public Long getId() {
+        return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
+    }
+
+    public String getFirstName() {
+        return firstName;
+    }
+
+    public void setFirstName(String firstName) {
+        this.firstName = firstName;
+    }
+
+    public String getLastName() {
+        return lastName;
+    }
+
+    public void setLastName(String lastName) {
+        this.lastName = lastName;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
+    }
+
+    public String getContactNo() {
+        return contactNo;
+    }
+
+    public void setContactNo(String contactNo) {
+        this.contactNo = contactNo;
+    }
+
+    public String getJobTitle() {
+        return jobTitle;
+    }
+
+    public void setJobTitle(String jobTitle) {
+        this.jobTitle = jobTitle;
+    }
+
+    public Integer getYearOfBirth() {
+        return yearOfBirth;
+    }
+
+    public void setYearOfBirth(Integer yearOfBirth) {
+        this.yearOfBirth = yearOfBirth;
+    }
+}
+```
+
+### Step 5: Create the Repository
+
+Create `src/main/java/com/example/simplecrmlite/repository/CustomerRepository.java`:
+
+```java
+package com.example.simplecrmlite.repository;
+
+import com.example.simplecrmlite.model.Customer;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface CustomerRepository extends JpaRepository<Customer, Long> {
+}
+```
+
+### Step 6: Create the REST Controller
+
+Create `src/main/java/com/example/simplecrmlite/controller/CustomerController.java`:
+
+```java
+package com.example.simplecrmlite.controller;
+
+import com.example.simplecrmlite.model.Customer;
+import com.example.simplecrmlite.repository.CustomerRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/customers")
+public class CustomerController {
+
+    @Autowired
+    private CustomerRepository customerRepository;
+
+    @GetMapping
+    public List<Customer> getAllCustomers() {
+        return customerRepository.findAll();
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<Customer> getCustomerById(@PathVariable Long id) {
+        return customerRepository.findById(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    @PostMapping
+    public ResponseEntity<Customer> createCustomer(@RequestBody Customer customer) {
+        Customer saved = customerRepository.save(customer);
+        return ResponseEntity.status(HttpStatus.CREATED).body(saved);
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<Customer> updateCustomer(@PathVariable Long id,
+                                                     @RequestBody Customer updatedCustomer) {
+        return customerRepository.findById(id)
+                .map(existing -> {
+                    existing.setFirstName(updatedCustomer.getFirstName());
+                    existing.setLastName(updatedCustomer.getLastName());
+                    existing.setEmail(updatedCustomer.getEmail());
+                    existing.setContactNo(updatedCustomer.getContactNo());
+                    existing.setJobTitle(updatedCustomer.getJobTitle());
+                    existing.setYearOfBirth(updatedCustomer.getYearOfBirth());
+                    Customer saved = customerRepository.save(existing);
+                    return ResponseEntity.ok(saved);
+                })
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> deleteCustomer(@PathVariable Long id) {
+        if (!customerRepository.existsById(id)) {
+            return ResponseEntity.notFound().build();
+        }
+        customerRepository.deleteById(id);
+        return ResponseEntity.noContent().build();
+    }
+}
+```
+
+### Step 7: Seed Sample Data on Startup
+
+Create `src/main/java/com/example/simplecrmlite/SimpleCrmLiteApplication.java` (or update the main class Spring Initializr generated):
+
+```java
+package com.example.simplecrmlite;
+
+import com.example.simplecrmlite.model.Customer;
+import com.example.simplecrmlite.repository.CustomerRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+
+@SpringBootApplication
+public class SimpleCrmLiteApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(SimpleCrmLiteApplication.class, args);
+    }
+
+    @Bean
+    CommandLineRunner loadSampleData(CustomerRepository customerRepository) {
+        return args -> {
+            if (customerRepository.count() == 0) {
+                customerRepository.save(new Customer("Bruce", "Wayne",
+                        "bruce@wayneenterprises.com", "11122233", "CEO", 1975));
+                customerRepository.save(new Customer("Diana", "Prince",
+                        "diana@themyscira.gov", "22233344", "Ambassador", 1980));
+                customerRepository.save(new Customer("Clark", "Kent",
+                        "clark@dailyplanet.com", "33344455", "Reporter", 1978));
+                System.out.println("✅ Sample data loaded: 3 customers added");
+            }
+        };
+    }
+}
+```
+
+### Step 8: Verify Locally Before Containerizing
+
+```bash
+mvn spring-boot:run
+```
+
+**Test:**
+```bash
+curl http://localhost:8080/customers
+```
+
+**Expected:** JSON array with 3 customers (Bruce Wayne, Diana Prince, Clark Kent).
+
+Stop the application (`Ctrl+C`) once verified — you're now ready for Part 1.
 
 ---
 
@@ -170,6 +472,14 @@ EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "app.jar"]
 ```
 
+**Note — filename alternative:** The `COPY` line above hardcodes the exact JAR filename (`simple-crm-lite-0.0.1-SNAPSHOT.jar`), which matches the Artifact/version you set in Part 0, Step 1. If you ever rename your project or bump the version and this line stops matching, you can swap it for the wildcard pattern used in Lessons 4.4/4.6 instead, which works regardless of the exact filename:
+
+```dockerfile
+COPY --from=build /app/target/*.jar app.jar
+```
+
+Either approach works — the hardcoded version above is used here since Part 0 fixes the exact project name and version in advance.
+
 ### Step 3: Understanding Each Line
 
 #### Stage 1 - Build Stage
@@ -260,6 +570,8 @@ simple-crm-lite   latest   abc123def456   2 minutes ago   350MB
 - Need to tell the container where the database is
 
 **Solution for now:** Connect to host's PostgreSQL from container using `host.docker.internal`
+
+**Note — Docker Desktop vs. bare Docker Engine:** `host.docker.internal` works out of the box on Docker Desktop (Mac, Windows, and recent Docker Desktop for Linux), which covers the vast majority of student setups. If any student is running plain Docker Engine directly on native Linux (no Docker Desktop), this hostname may not resolve without an extra `--add-host=host.docker.internal:host-gateway` flag on `docker run`. This step is temporary regardless — Part 5 replaces it entirely with Docker Compose's service-name networking, which doesn't rely on `host.docker.internal` at all.
 
 ### Step 2: Update application.properties
 
@@ -470,6 +782,8 @@ services:
 volumes:
   postgres-data:
 ```
+
+**Note — Postgres version:** This lesson uses `postgres:16-alpine`, while Lesson 4.6 used `postgres:15`. This is intentional, not an error — different lessons in this module use different Postgres versions to reflect that any recent Postgres version works fine for these exercises. Nothing here depends on a specific version; feel free to align both lessons to the same tag if you'd prefer strict consistency across the module.
 
 ### Step 3: Understanding docker-compose.yml
 
