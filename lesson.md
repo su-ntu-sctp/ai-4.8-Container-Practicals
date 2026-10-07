@@ -4,6 +4,8 @@
 
 In this lesson you will apply the Docker and containerization concepts you learned in previous lessons to a Spring Boot application - the **simple-crm-lite** project.
 
+You will run **both** the application and its PostgreSQL database in containers with Docker Compose. There is no local PostgreSQL to install and no `mvn spring-boot:run` - you go straight from writing the code to running it in containers. Finally, you will prove that your data survives the containers being removed and recreated.
+
 ## Why Simple-CRM-Lite?
 
 Today's focus is learning Docker, not debugging complex applications. Your full simple-crm (with Product, Interaction entities, relationships) can introduce issues unrelated to Docker - like JPA lazy loading in containers or relationship serialization errors. Using a simplified baseline (Customer entity only) ensures everyone learns Docker concepts successfully.
@@ -15,10 +17,10 @@ Today's focus is learning Docker, not debugging complex applications. Your full 
 By the end of this session, you will be able to:
 
 1. **Scaffold** a simplified Spring Boot REST API project (simple-crm-lite) with a single entity
-2. **Apply** Docker containerization to a multi-layered Spring Boot REST API application
-3. **Create** a Dockerfile for a Spring Boot application with PostgreSQL dependencies
-4. **Configure** Docker Compose to orchestrate multiple containers (application + database)
-5. **Test** and verify that containerized endpoints work correctly
+2. **Create** a multi-stage Dockerfile for a Spring Boot application with PostgreSQL dependencies
+3. **Configure** Docker Compose to run the application and a PostgreSQL database together
+4. **Test** containerized CRUD endpoints
+5. **Verify** that data persists in a Docker volume after `docker compose down` and `docker compose up`
 
 ---
 
@@ -28,16 +30,24 @@ Before starting this lesson, ensure you have:
 
 - Completed Lessons 4.4 (Local Containerization) and 4.6 (Docker Compose)
 - Docker Desktop installed and running
-- Java 21 and Maven installed
-- PostgreSQL installed locally (for local verification before containerizing)
+- VS Code (Java 21 and Maven are optional - the application is built inside Docker)
+- **Port 5432 free.** The database container uses port 5432. If you installed PostgreSQL on your computer, stop it first, as in Lesson 4.6:
 
-**Note:** Unlike previous lessons, you do NOT need an existing project yet — Part 0 below walks you through creating **simple-crm-lite** from scratch.
+```bash
+# Windows (WSL)
+sudo service postgresql stop
+
+# macOS (Homebrew) - use your installed version
+brew services stop postgresql@16
+```
+
+**Note:** You do NOT need PostgreSQL installed on your computer. Both the application and the database run in containers.
 
 ---
 
 ## Part 0: Create Simple-CRM-Lite
 
-Before containerizing anything, let's build the simplified project this lesson uses.
+Let's write the simplified project this lesson uses. You will not run it with Maven - in Parts 2 and 3 it runs in containers.
 
 ### Step 1: Generate the Project with Spring Initializr
 
@@ -45,7 +55,7 @@ Before containerizing anything, let's build the simplified project this lesson u
 2. Fill in the project details:
    - **Project:** Maven
    - **Language:** Java
-   - **Spring Boot:** 3.2.0
+   - **Spring Boot:** leave the default version
    - **Group:** `com.example`
    - **Artifact:** `simple-crm-lite`
    - **Name:** `simple-crm-lite`
@@ -60,41 +70,34 @@ Before containerizing anything, let's build the simplified project this lesson u
 
 **Important:** Keep the **Artifact** exactly as `simple-crm-lite` and leave the default version as `0.0.1-SNAPSHOT`. The Dockerfile later in this lesson references the exact filename this produces (`simple-crm-lite-0.0.1-SNAPSHOT.jar`) — matching it now avoids a mismatch later.
 
-### Step 2: Set Up Local PostgreSQL Database
+### Step 2: Configure application.properties
 
-Before running the app, create the local database:
-
-```sql
--- Connect to psql, then run:
-CREATE DATABASE simplecrmlite;
-```
-
-### Step 3: Configure application.properties
-
-Open `src/main/resources/application.properties` and add:
+Open `src/main/resources/application.properties` and replace its contents with:
 
 ```properties
 # Application name
 spring.application.name=simple-crm-lite
 
-# Database configuration (local PostgreSQL)
-spring.datasource.url=jdbc:postgresql://localhost:5432/simplecrmlite
-spring.datasource.username=postgres
-spring.datasource.password=password
+# Database connection - values come from docker-compose.yml (Part 3)
+spring.datasource.url=${SPRING_DATASOURCE_URL}
+spring.datasource.username=${SPRING_DATASOURCE_USERNAME}
+spring.datasource.password=${SPRING_DATASOURCE_PASSWORD}
 
-# JPA configuration
+# JPA configuration - create or update the customer table automatically
 spring.jpa.hibernate.ddl-auto=update
 spring.jpa.show-sql=true
-spring.jpa.properties.hibernate.format_sql=true
-spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
 
 # Server configuration
 server.port=8080
 ```
 
-**Note:** Adjust `spring.datasource.username` / `spring.datasource.password` to match your own local PostgreSQL credentials if they differ.
+**What are the `${...}` values?**
+- They are placeholders filled in from **environment variables** when the application starts - the same pattern as Lesson 4.6
+- Docker Compose sets `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME` and `SPRING_DATASOURCE_PASSWORD` for the app container in Part 3
+- This keeps database settings out of your code: the same image works with any database, only the environment changes
+- Because these values only exist inside Docker Compose, the application is meant to run with `docker compose`, not `mvn spring-boot:run`
 
-### Step 4: Create the Customer Entity
+### Step 3: Create the Customer Entity
 
 Create `src/main/java/com/example/simplecrmlite/model/Customer.java`:
 
@@ -193,7 +196,7 @@ public class Customer {
 }
 ```
 
-### Step 5: Create the Repository
+### Step 4: Create the Repository
 
 Create `src/main/java/com/example/simplecrmlite/repository/CustomerRepository.java`:
 
@@ -209,7 +212,7 @@ public interface CustomerRepository extends JpaRepository<Customer, Long> {
 }
 ```
 
-### Step 6: Create the REST Controller
+### Step 5: Create the REST Controller
 
 Create `src/main/java/com/example/simplecrmlite/controller/CustomerController.java`:
 
@@ -278,7 +281,7 @@ public class CustomerController {
 }
 ```
 
-### Step 7: Seed Sample Data on Startup
+### Step 6: Seed Sample Data on Startup
 
 Create `src/main/java/com/example/simplecrmlite/SimpleCrmLiteApplication.java` (or update the main class Spring Initializr generated):
 
@@ -317,98 +320,55 @@ public class SimpleCrmLiteApplication {
 }
 ```
 
-### Step 8: Verify Locally Before Containerizing
-
-```bash
-mvn spring-boot:run
-```
-
-**Test:**
-```bash
-curl http://localhost:8080/customers
-```
-
-**Expected:** JSON array with 3 customers (Bruce Wayne, Diana Prince, Clark Kent).
-
-Stop the application (`Ctrl+C`) once verified — you're now ready for Part 1.
+**Note:** The `if (customerRepository.count() == 0)` check means the 3 sample customers are only added when the `customer` table is **empty**. You will use this in Part 5 to prove that your data persists.
 
 ---
 
-## Part 1: Verify Your Setup
+## Part 1: What We'll Build
 
-Before containerizing, ensure your simple-crm-lite application is working correctly locally. Run it with Maven and confirm you can hit the `/customers` endpoint before proceeding.
-
----
-
-## Part 2: Understanding What We'll Build
-
-### Current Architecture (Local)
+### Target Architecture
 
 ```
-┌─────────────────────────────────────┐
-│   Your Computer                     │
-│                                     │
-│  ┌──────────────────────────────┐  │
-│  │  simple-crm-lite (Port 8080) │  │
-│  │  - Running with mvn          │  │
-│  │  - Uses Java 21              │  │
-│  └──────────────────────────────┘  │
-│              ↓                      │
-│  ┌──────────────────────────────┐  │
-│  │  PostgreSQL (Port 5432)      │  │
-│  │  - Running on your machine   │  │
-│  │  - Database: simplecrmlite   │  │
-│  └──────────────────────────────┘  │
-└─────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│   Your Computer                                      │
+│                                                      │
+│   localhost:8080              localhost:5432         │
+│        │                            │                │
+│  ┌─────┼────────────────────────────┼─────────────┐  │
+│  │     │  Docker Network: simple-crm-lite_default │  │
+│  │     ▼                            ▼             │  │
+│  │  ┌────────────────────┐   ┌──────────────────┐ │  │
+│  │  │ app                │   │ db               │ │  │
+│  │  │ simple-crm-lite    │──▶│ PostgreSQL 16    │ │  │
+│  │  │ Spring Boot :8080  │   │ :5432            │ │  │
+│  │  └────────────────────┘   └────────┬─────────┘ │  │
+│  └────────────────────────────────────┼───────────┘  │
+│                                       ▼              │
+│                         Volume: postgres-data        │
+│                         (the data lives here)        │
+└──────────────────────────────────────────────────────┘
 ```
 
-### Target Architecture (Containerized)
+### Key Ideas
 
-```
-┌─────────────────────────────────────────────────┐
-│   Your Computer                                 │
-│                                                 │
-│  ┌──────────────────────────────────────────┐  │
-│  │  Docker Network: simple-crm-lite_default │  │
-│  │                                          │  │
-│  │  ┌──────────────────────────────────┐   │  │
-│  │  │  simple-crm-lite-app Container   │   │  │
-│  │  │  - Spring Boot                   │   │  │
-│  │  │  - Java 21                       │   │  │
-│  │  │  - Port 8080                     │   │  │
-│  │  └──────────────────────────────────┘   │  │
-│  │              ↓                           │  │
-│  │  ┌──────────────────────────────────┐   │  │
-│  │  │  simple-crm-lite-db Container    │   │  │
-│  │  │  - PostgreSQL 16                 │   │  │
-│  │  │  - Port 5432                     │   │  │
-│  │  │  - Data in volume                │   │  │
-│  │  └──────────────────────────────────┘   │  │
-│  └──────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────┘
-```
-
-### Key Differences
-
-| Aspect | Local | Containerized |
-|--------|-------|---------------|
-| **Application** | Runs with `mvn spring-boot:run` | Runs in Docker container |
-| **Database** | Your local PostgreSQL | Separate PostgreSQL container |
-| **Isolation** | Shares your computer's environment | Each container is isolated |
-| **Portability** | Only works on your machine | Works on any machine with Docker |
-| **Cleanup** | Must uninstall manually | Delete containers = clean slate |
+| Idea | What it means in this lesson |
+|------|------------------------------|
+| **Service name as hostname** | The app connects to `jdbc:postgresql://db:5432/simplecrmlite`. Inside the app container, `localhost` means the app container itself, so it uses the service name `db` instead |
+| **Configuration from the environment** | Docker Compose sets `SPRING_DATASOURCE_*`; `application.properties` reads them |
+| **Start order** | The database has a healthcheck; the app waits until the database is healthy |
+| **Data in a named volume** | PostgreSQL stores its files in the `postgres-data` volume, not inside the container, so the data survives when containers are removed |
 
 ### Why Containerize?
 
 **Benefits you'll experience today:**
 1. **Consistency** - Works the same on any machine
 2. **Isolation** - App dependencies don't affect your computer
-3. **Easy cleanup** - Remove containers, everything's gone
+3. **Easy cleanup** - Remove containers, everything's gone (except data you chose to keep in a volume)
 4. **Professional practice** - This is how production apps run
 
 ---
 
-## Part 3: Create the Dockerfile
+## Part 2: Create the Dockerfile
 
 A Dockerfile is a recipe that tells Docker how to build an image of your application.
 
@@ -558,178 +518,15 @@ simple-crm-lite   latest   abc123def456   2 minutes ago   350MB
 
 **✅ Success!** Docker image created.
 
----
-
-## Part 4: Run Your Containerized Application
-
-### Step 1: Understanding the Challenge
-
-**Problem:** Your containerized app needs to connect to PostgreSQL, but:
-- Container is isolated
-- Cannot access `localhost` PostgreSQL (that's your computer, not inside the container)
-- Need to tell the container where the database is
-
-**Solution for now:** Connect to host's PostgreSQL from container using `host.docker.internal`
-
-**Note — Docker Desktop vs. bare Docker Engine:** `host.docker.internal` works out of the box on Docker Desktop (Mac, Windows, and recent Docker Desktop for Linux), which covers the vast majority of student setups. If any student is running plain Docker Engine directly on native Linux (no Docker Desktop), this hostname may not resolve without an extra `--add-host=host.docker.internal:host-gateway` flag on `docker run`. This step is temporary regardless — Part 5 replaces it entirely with Docker Compose's service-name networking, which doesn't rely on `host.docker.internal` at all.
-
-### Step 2: Update application.properties
-
-Create a new file: `src/main/resources/application-docker.properties`
-
-```properties
-# Database Configuration for Docker
-spring.datasource.url=jdbc:postgresql://host.docker.internal:5432/simplecrmlite
-spring.datasource.username=postgres
-spring.datasource.password=password
-
-# JPA Configuration
-spring.jpa.hibernate.ddl-auto=update
-spring.jpa.show-sql=true
-spring.jpa.properties.hibernate.format_sql=true
-spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
-
-# Server Configuration
-server.port=8080
-```
-
-**Key difference:** `localhost` is replaced with `host.docker.internal` — Docker's way to reach the host machine from inside a container.
-
-### Step 3: Rebuild Image
-
-```bash
-docker build -t simple-crm-lite:latest .
-```
-
-### Step 4: Run the Container
-
-```bash
-docker run -d \
-  --name simple-crm-lite-app \
-  -p 8080:8080 \
-  -e SPRING_PROFILES_ACTIVE=docker \
-  simple-crm-lite:latest
-```
-
-**Flags explained:**
-- `-d` — detached mode (runs in background)
-- `--name simple-crm-lite-app` — names the container
-- `-p 8080:8080` — maps host port 8080 to container port 8080
-- `-e SPRING_PROFILES_ACTIVE=docker` — tells Spring Boot to use `application-docker.properties`
-
-### Step 5: Check Container is Running
-
-```bash
-docker ps
-```
-
-**Expected output:**
-```
-CONTAINER ID   IMAGE                    COMMAND              STATUS         PORTS
-a1b2c3d4e5f6   simple-crm-lite:latest   "java -jar app.jar"  Up 9 seconds   0.0.0.0:8080->8080/tcp
-```
-
-### Step 6: Check Application Logs
-
-```bash
-docker logs simple-crm-lite-app
-```
-
-**Look for:**
-```
-Started SimpleCrmLiteApplication in X.XXX seconds
-✅ Sample data loaded: 3 customers added
-```
-
-### Step 7: Test the Containerized Application
-
-```bash
-curl http://localhost:8080/customers
-```
-
-**Expected:** JSON array with 3 customers
-
-### Step 8: Test All CRUD Operations
-
-#### Create (POST)
-```bash
-curl -X POST http://localhost:8080/customers \
-  -H "Content-Type: application/json" \
-  -d '{
-    "firstName": "Tony",
-    "lastName": "Stark",
-    "email": "tony@starkindustries.com",
-    "contactNo": "55566677",
-    "jobTitle": "CEO",
-    "yearOfBirth": 1980
-  }'
-```
-
-**Expected:** 201 CREATED with new customer (id: 4)
-
-#### Read (GET)
-```bash
-curl http://localhost:8080/customers/4
-```
-
-**Expected:** 200 OK with Tony Stark's data
-
-#### Update (PUT)
-```bash
-curl -X PUT http://localhost:8080/customers/4 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "firstName": "Tony",
-    "lastName": "Stark",
-    "email": "ironman@starkindustries.com",
-    "contactNo": "55566677",
-    "jobTitle": "Superhero CEO",
-    "yearOfBirth": 1980
-  }'
-```
-
-**Expected:** 200 OK with updated data
-
-#### Delete (DELETE)
-```bash
-curl -X DELETE http://localhost:8080/customers/4
-```
-
-**Expected:** 204 NO CONTENT
-
-Verify deletion:
-```bash
-curl http://localhost:8080/customers/4
-```
-
-**Expected:** 404 NOT FOUND
-
-**✅ Success!** Your containerized application works perfectly!
-
-### Step 9: Stop and Remove Container
-
-```bash
-docker stop simple-crm-lite-app
-docker rm simple-crm-lite-app
-```
-
-We'll use Docker Compose in the next part instead.
+**Don't run this image on its own with `docker run`** — the app needs a database and the `SPRING_DATASOURCE_*` environment variables. Docker Compose provides both in Part 3, and builds the image for you with `--build`.
 
 ---
 
-## Part 5: Add PostgreSQL Container with Docker Compose
+## Part 3: Run the App and Database with Docker Compose
 
 ### Step 1: Why Docker Compose?
 
-**Problem with current setup:**
-- Application in container ✅
-- Database on your computer ❌
-- Not fully portable
-
-**Solution: Docker Compose**
-- Application container + Database container
-- Both start with one command
-- Fully portable — only needs Docker
+The application needs a database. Docker Compose starts both containers, connects them on a shared network and creates the volume - with one command.
 
 ### Step 2: Create docker-compose.yml
 
@@ -748,11 +545,11 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
     ports:
-      - "5433:5432"
+      - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d simplecrmlite"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -783,7 +580,7 @@ volumes:
   postgres-data:
 ```
 
-**Note — Postgres version:** This lesson uses `postgres:16-alpine`, while Lesson 4.6 used `postgres:15`. This is intentional, not an error — different lessons in this module use different Postgres versions to reflect that any recent Postgres version works fine for these exercises. Nothing here depends on a specific version; feel free to align both lessons to the same tag if you'd prefer strict consistency across the module.
+**Note — Postgres version:** This lesson uses `postgres:16-alpine`, while Lesson 4.6 used `postgres:15`. Any recent PostgreSQL version works for these exercises.
 
 ### Step 3: Understanding docker-compose.yml
 
@@ -791,62 +588,58 @@ volumes:
 
 **`image: postgres:16-alpine`** — official lightweight PostgreSQL 16 image
 
-**`ports: "5433:5432"`** — maps host port 5433 to container port 5432, avoiding conflict with your local PostgreSQL on 5432
+**`environment`** — creates the `simplecrmlite` database and the `postgres` user the first time the container starts
 
-**`volumes: postgres-data:/var/lib/postgresql/data`** — persists database data; survives container removal
+**`ports: "5432:5432"`** — publishes PostgreSQL on `localhost:5432` so tools on your computer (for example a database GUI) can connect. The app does not need this - it connects over the Compose network. Port 5432 on your computer must be free (see Prerequisites)
 
-**`healthcheck`** — checks if database is ready before app starts
+**`volumes: postgres-data:/var/lib/postgresql/data`** — PostgreSQL keeps its data files in the named volume `postgres-data`. The volume is separate from the container, so it survives `docker compose down`
+
+**`healthcheck`** — `pg_isready` reports when the database is ready to accept connections
 
 #### Application Service (app)
 
-**`build:`** — builds image from Dockerfile in current directory
+**`build:`** — builds the image from the Dockerfile in the current directory
 
-**`SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/simplecrmlite`** — uses `db` as hostname (Docker Compose service name), not `localhost`
+**`SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/simplecrmlite`** — fills in the `${SPRING_DATASOURCE_URL}` placeholder in `application.properties`. The host is `db` (the service name), not `localhost`
 
-**`depends_on: condition: service_healthy`** — app waits for database to pass health check before starting
+**`depends_on: condition: service_healthy`** — the app starts only after the database passes its healthcheck
 
-**`restart: unless-stopped`** — automatically restarts if the container crashes
+**`restart: unless-stopped`** — automatically restarts the app container if it crashes
 
-### Step 4: Remove application-docker.properties
-
-Docker Compose uses environment variables directly, so this file is no longer needed:
-
-```bash
-rm src/main/resources/application-docker.properties
-```
-
-### Step 5: Start Everything with Docker Compose
+### Step 4: Start Everything with Docker Compose
 
 ```bash
 cd simple-crm-lite
 
-docker compose up -d
+docker compose up -d --build
 ```
 
-**Expected output:**
+`--build` builds the application image from your Dockerfile before starting the containers.
+
+**Expected output (after the build):**
 ```
-[+] Running 3/3
- ✔ Network simple-crm-lite_default       Created
- ✔ Container simple-crm-lite-db          Started
- ✔ Container simple-crm-lite-app         Started
+[+] Running 4/4
+ ✔ Network simple-crm-lite_default          Created
+ ✔ Volume "simple-crm-lite_postgres-data"   Created
+ ✔ Container simple-crm-lite-db             Healthy
+ ✔ Container simple-crm-lite-app            Started
 ```
 
-### Step 6: Watch the Logs
+### Step 5: Watch the Application Logs
 
 ```bash
-docker compose logs -f
+docker compose logs -f app
 ```
 
 **Look for:**
 ```
-simple-crm-lite-db   | database system is ready to accept connections
 simple-crm-lite-app  | Started SimpleCrmLiteApplication in X.XXX seconds
 simple-crm-lite-app  | ✅ Sample data loaded: 3 customers added
 ```
 
-Press `Ctrl+C` to exit log viewing — containers keep running.
+Press `Ctrl+C` to stop viewing the logs — the containers keep running.
 
-### Step 7: Verify Both Containers Running
+### Step 6: Verify Both Containers Are Running
 
 ```bash
 docker compose ps
@@ -854,28 +647,94 @@ docker compose ps
 
 **Expected output:**
 ```
-NAME                  IMAGE                  STATUS                   PORTS
-simple-crm-lite-app   simple-crm-lite        Up 30 seconds (healthy)  0.0.0.0:8080->8080/tcp
-simple-crm-lite-db    postgres:16-alpine     Up 45 seconds (healthy)  0.0.0.0:5433->5432/tcp
+NAME                  IMAGE                 SERVICE   STATUS                    PORTS
+simple-crm-lite-app   simple-crm-lite-app   app       Up 30 seconds             0.0.0.0:8080->8080/tcp
+simple-crm-lite-db    postgres:16-alpine    db        Up 45 seconds (healthy)   0.0.0.0:5432->5432/tcp
 ```
 
-Both should show `Up` and `(healthy)`.
+The database shows `(healthy)` because it has a healthcheck. The app shows `Up`.
 
 ---
 
-## Part 6: Test the Complete Containerized Stack
+## Part 4: Test the CRUD API
 
-### Step 1: Basic Endpoint Test
+### Step 1: Read All Customers
 
 ```bash
 curl http://localhost:8080/customers
 ```
 
-**Expected:** JSON array with 3 sample customers
+**Expected:** JSON array with the 3 sample customers (Bruce Wayne, Diana Prince, Clark Kent)
 
-### Step 2: Test Full CRUD Cycle
+### Step 2: Create (POST)
 
-**Create:**
+```bash
+curl -X POST http://localhost:8080/customers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "firstName": "Tony",
+    "lastName": "Stark",
+    "email": "tony@starkindustries.com",
+    "contactNo": "55566677",
+    "jobTitle": "CEO",
+    "yearOfBirth": 1980
+  }'
+```
+
+**Expected:** 201 CREATED with the new customer. Note the `id` in the response (usually `4`) and use it in the next steps.
+
+### Step 3: Read One (GET)
+
+```bash
+curl http://localhost:8080/customers/4
+```
+
+**Expected:** 200 OK with Tony Stark's data
+
+### Step 4: Update (PUT)
+
+```bash
+curl -X PUT http://localhost:8080/customers/4 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "firstName": "Tony",
+    "lastName": "Stark",
+    "email": "ironman@starkindustries.com",
+    "contactNo": "55566677",
+    "jobTitle": "Superhero CEO",
+    "yearOfBirth": 1980
+  }'
+```
+
+**Expected:** 200 OK with the updated data
+
+### Step 5: Delete (DELETE)
+
+```bash
+curl -X DELETE http://localhost:8080/customers/4
+```
+
+**Expected:** 204 NO CONTENT
+
+Verify the deletion:
+```bash
+curl -i http://localhost:8080/customers/4
+```
+
+**Expected:** `HTTP/1.1 404` — the customer is gone
+
+**✅ Success!** Your containerized application reads and writes to the containerized database.
+
+---
+
+## Part 5: Prove the Data Persists
+
+Containers are disposable: `docker compose down` **removes** them. Your data must survive this, because PostgreSQL stores it in the `postgres-data` volume, not in the container.
+
+You will write a customer, remove all the containers, start new ones, and check the customer is still there.
+
+### Step 1: Write a Customer You Will Keep
+
 ```bash
 curl -X POST http://localhost:8080/customers \
   -H "Content-Type: application/json" \
@@ -889,83 +748,116 @@ curl -X POST http://localhost:8080/customers \
   }'
 ```
 
-**Read:**
+**Note the `id`** in the response (usually `5`, because Tony used `4`). This time, do NOT delete it.
+
+### Step 2: Check the Customer Is in the Database
+
+Ask PostgreSQL directly, not the app:
+
 ```bash
-curl http://localhost:8080/customers
+docker compose exec db psql -U postgres -d simplecrmlite \
+  -c "SELECT id, first_name, last_name, email FROM customer ORDER BY id;"
 ```
 
-Should now show 4 customers (3 sample + Natasha)
+**Expected:** 4 rows — the 3 sample customers and Natasha Romanoff
 
-**Update:**
-```bash
-curl -X PUT http://localhost:8080/customers/4 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "firstName": "Natasha",
-    "lastName": "Romanoff",
-    "email": "blackwidow@avengers.com",
-    "contactNo": "44455566",
-    "jobTitle": "Avenger",
-    "yearOfBirth": 1985
-  }'
-```
-
-**Delete:**
-```bash
-curl -X DELETE http://localhost:8080/customers/4
-```
-
-**Verify deletion:**
-```bash
-curl http://localhost:8080/customers
-```
-
-Should be back to 3 customers.
-
-### Step 3: Test Data Persistence
-
-Data should survive container restart:
+### Step 3: Remove the Containers
 
 ```bash
-# Stop all containers
 docker compose down
-
-# Start again
-docker compose up -d
-
-# Wait 10 seconds for startup
-sleep 10
-
-# Check data
-curl http://localhost:8080/customers
 ```
 
-**Expected:** Still see 3 sample customers — volume persists data even when containers are removed.
+**Expected output:**
+```
+[+] Running 3/3
+ ✔ Container simple-crm-lite-app        Removed
+ ✔ Container simple-crm-lite-db         Removed
+ ✔ Network simple-crm-lite_default      Removed
+```
 
-### Step 4: Access Database Directly (Optional)
+The containers and the network are gone. Notice the **volume is not in this list**. Check:
 
 ```bash
-docker exec -it simple-crm-lite-db psql -U postgres -d simplecrmlite
+docker compose ps -a      # no containers listed
+docker volume ls          # the volume is still there
 ```
 
-**Inside PostgreSQL:**
-```sql
-SELECT * FROM customer;
-\q
+**Expected from `docker volume ls`:**
+```
+DRIVER    VOLUME NAME
+local     simple-crm-lite_postgres-data
 ```
 
-**✅ Success!** Complete containerized stack working perfectly!
+### Step 4: Start New Containers
+
+```bash
+docker compose up -d
+docker compose logs -f app
+```
+
+Wait for `Started SimpleCrmLiteApplication`, then press `Ctrl+C`. These are brand-new containers, attached to the same volume.
+
+### Step 5: Check the Evidence
+
+**1. Natasha is still there** (use the `id` from Step 1):
+```bash
+curl http://localhost:8080/customers/5
+```
+
+**Expected:** 200 OK with Natasha Romanoff's data
+
+**2. The database still has 4 rows:**
+```bash
+docker compose exec db psql -U postgres -d simplecrmlite \
+  -c "SELECT id, first_name, last_name FROM customer ORDER BY id;"
+```
+
+**3. The sample data was NOT loaded again:**
+```bash
+docker compose logs app | grep "Sample data loaded"
+```
+
+**Expected:** no output. The new app container found customers already in the table, so `count() == 0` was false and the seeding was skipped.
+
+| Evidence | What you see | Why |
+|----------|--------------|-----|
+| `curl /customers/5` | Natasha is returned | The row was read from the volume |
+| `psql SELECT` | 4 rows, same ids | The database files survived `down` |
+| `grep "Sample data loaded"` | No output | The table was not empty on startup |
+
+**✅ Data persisted** — the containers were replaced, the data was not.
+
+### Step 6: Contrast — Delete the Volume
+
+Now see what happens without the volume:
+
+```bash
+docker compose down -v      # -v also removes the named volume
+docker volume ls            # simple-crm-lite_postgres-data is gone
+docker compose up -d
+docker compose logs -f app  # wait for "Started", then Ctrl+C
+```
+
+Check again:
+```bash
+curl -i http://localhost:8080/customers/5             # 404 - Natasha is gone
+docker compose logs app | grep "Sample data loaded"   # ✅ Sample data loaded: 3 customers added
+```
+
+PostgreSQL started with an empty volume, so the table was empty and the 3 sample customers were loaded again. **The data lived in the volume, not in the container.**
+
+> **Remember:** `docker compose down` keeps volumes. `docker compose down -v` deletes them — and your data with them. Never use `-v` on data you need.
 
 ---
 
 ## Useful Docker Compose Commands
 
 ```bash
-# Start all services in background
-docker compose up -d
-
-# Start and rebuild images
+# Build images and start all services in the background
 docker compose up -d --build
+
+# Start all services in the background
+docker compose up -d
 
 # Stop all services (containers remain)
 docker compose stop
@@ -973,7 +865,7 @@ docker compose stop
 # Start stopped services
 docker compose start
 
-# Stop and remove all containers and networks
+# Stop and remove containers and network (volumes are kept)
 docker compose down
 
 # Stop and remove everything including volumes (data lost!)
@@ -982,20 +874,26 @@ docker compose down -v
 # View logs from all services
 docker compose logs
 
-# View logs from specific service
+# View logs from one service
 docker compose logs app
 
-# Follow logs in real-time
+# Follow logs in real time
 docker compose logs -f
 
-# View running services
+# View services and their status
 docker compose ps
 
-# Restart specific service
+# Restart one service
 docker compose restart app
 
-# Execute command in service container
+# Open a PostgreSQL shell in the db container
+docker compose exec db psql -U postgres -d simplecrmlite
+
+# Open a shell in the app container
 docker compose exec app /bin/sh
+
+# List volumes
+docker volume ls
 
 # View resource usage
 docker stats
@@ -1007,79 +905,88 @@ docker stats
 
 ### Issue 1: Port Already in Use
 
-**Error:** `Bind for 0.0.0.0:8080 failed: port is already allocated`
+**Error:** `Bind for 0.0.0.0:5432 failed: port is already allocated` (or `0.0.0.0:8080`)
 
-**Solution:**
+**Port 5432:** PostgreSQL is probably running on your computer. Stop it:
 ```bash
-# Find what's using port 8080
-lsof -i :8080
+# Windows (WSL)
+sudo service postgresql stop
 
-# Kill the process if needed
-kill -9 <PID>
-
-# Or change port in docker-compose.yml
-ports:
-  - "8081:8080"
+# macOS (Homebrew)
+brew services stop postgresql@16
 ```
+
+**Port 8080:** Find and stop whatever is using it:
+```bash
+lsof -i :8080
+kill -9 <PID>
+```
+
+Then run `docker compose up -d` again.
 
 ---
 
 ### Issue 2: Database Connection Failed
 
-**Error in logs:** `Connection refused` or `Unknown host`
+**Error in logs:** `Connection refused` or `UnknownHostException: db`
 
-**Solution 1 — Wait longer:**
-```bash
-docker compose down
-docker compose up -d
-sleep 20
-docker compose logs app
-```
-
-**Solution 2 — Check health:**
+**Check the database is healthy:**
 ```bash
 docker compose ps
-# DB should show "(healthy)"
+# db should show "(healthy)"
 ```
 
-**Solution 3 — Verify network:**
+**Check the connection settings** in `docker-compose.yml`: the URL must be `jdbc:postgresql://db:5432/simplecrmlite` — `db`, not `localhost`.
+
+**Check the network:**
 ```bash
-docker network ls
 docker network inspect simple-crm-lite_default
 ```
 
 ---
 
-### Issue 3: Changes Not Reflected
+### Issue 3: `Could not resolve placeholder 'SPRING_DATASOURCE_URL'`
 
-**Solution:** Rebuild the image
+The app started without the environment variables from `docker-compose.yml`. This happens if you run it with `mvn spring-boot:run`, or if the `environment:` section of the `app` service is missing or misspelled. Run the app with `docker compose up -d --build`.
+
+---
+
+### Issue 4: Changes Not Reflected
+
+You changed the code but the app behaves the same. Rebuild the image:
 ```bash
-docker compose down
 docker compose up -d --build
 ```
 
 ---
 
-### Issue 4: "No space left on device"
+### Issue 5: My Data Disappeared
+
+- **You ran `docker compose down -v`** — the `-v` deletes the volume and all its data
+- **You ran Compose from a different folder** — the volume name starts with the project folder name (`simple-crm-lite_postgres-data`). A renamed or copied folder (for example `simple-crm-lite (1)`) gets a new, empty volume. Check with `docker volume ls`
+
+---
+
+### Issue 6: Sample Data Not Loading
+
+The sample data is only added when the `customer` table is **empty**. If you already have customers, that is persistence working — not a bug.
 
 ```bash
-docker container prune -f
-docker image prune -a -f
-docker volume prune -f
+docker compose exec db psql -U postgres -d simplecrmlite -c "SELECT * FROM customer;"
+```
+
+To start completely fresh:
+```bash
+docker compose down -v
+docker compose up -d
 ```
 
 ---
 
-### Issue 5: Sample Data Not Loading
+### Issue 7: "No space left on device"
 
 ```bash
-docker exec -it simple-crm-lite-db psql -U postgres -d simplecrmlite
-
-# Check if customers exist
-SELECT * FROM customer;
-\q
-
-# If empty, restart app
-docker compose restart app
-docker compose logs app
+docker container prune -f
+docker image prune -a -f
+docker volume prune -f      # careful: removes unused volumes and their data
 ```
